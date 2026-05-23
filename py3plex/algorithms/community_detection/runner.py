@@ -14,7 +14,12 @@ from py3plex.algorithms.community_detection.budget import BudgetSpec, CommunityR
 
 
 def run_community_algorithm(
-    algorithm_id: str, network: Any, budget: BudgetSpec, seed: int, **kwargs
+    algorithm_id: str,
+    network: Any,
+    budget: BudgetSpec,
+    seed: int,
+    hyperparams: Optional[Dict[str, Any]] = None,
+    **kwargs,
 ) -> CommunityResult:
     """Run a community detection algorithm with budget constraints.
 
@@ -63,19 +68,19 @@ def run_community_algorithm(
     try:
         # Route to specific algorithm implementation
         if algo_name in ("louvain", "multilayer_louvain"):
-            result = _run_louvain(network, budget, seed, **kwargs)
+            result = _run_louvain(network, budget, seed, hyperparams=hyperparams, **kwargs)
 
         elif algo_name in ("leiden", "multilayer_leiden"):
-            result = _run_leiden(network, budget, seed, **kwargs)
+            result = _run_leiden(network, budget, seed, hyperparams=hyperparams, **kwargs)
 
         elif algo_name == "label_propagation":
-            result = _run_label_propagation(network, budget, seed, **kwargs)
+            result = _run_label_propagation(network, budget, seed, hyperparams=hyperparams, **kwargs)
 
         elif algo_name in ("sbm", "standard_sbm"):
-            result = _run_sbm(network, budget, seed, **kwargs)
+            result = _run_sbm(network, budget, seed, hyperparams=hyperparams, **kwargs)
 
         elif algo_name in ("dc_sbm", "degree_corrected_sbm"):
-            result = _run_dc_sbm(network, budget, seed, **kwargs)
+            result = _run_dc_sbm(network, budget, seed, hyperparams=hyperparams, **kwargs)
 
         else:
             raise ValueError(
@@ -108,7 +113,7 @@ def run_community_algorithm(
 
 
 def _run_louvain(
-    network: Any, budget: BudgetSpec, seed: int, **kwargs
+    network: Any, budget: BudgetSpec, seed: int, hyperparams: Optional[Dict[str, Any]] = None, **kwargs
 ) -> Dict[str, Any]:
     """Run Louvain algorithm with budget constraints.
 
@@ -116,12 +121,17 @@ def _run_louvain(
         network: Multilayer network
         budget: Budget specification
         seed: Random seed
+        hyperparams: HPO hyperparameters (gamma, omega)
         **kwargs: Additional parameters
 
     Returns:
         Dict with 'partition', 'warnings', 'meta'
     """
     from py3plex.algorithms.community_detection import multilayer_louvain
+
+    hp = hyperparams or {}
+    gamma = hp.get("gamma", 1.0)
+    omega = hp.get("omega", 1.0)
 
     # Check if UQ is requested
     enable_uq = budget.uq_samples is not None and budget.uq_samples > 1
@@ -148,18 +158,24 @@ def _run_louvain(
         meta = {
             "uq_enabled": True,
             "n_samples": n_samples,
+            "gamma": gamma,
+            "omega": omega,
         }
 
     else:
         # Run without UQ
         partition, modularity = multilayer_louvain(
             network,
+            gamma=gamma,
+            omega=omega,
             random_state=seed,
         )
 
         meta = {
             "uq_enabled": False,
             "modularity": modularity,
+            "gamma": gamma,
+            "omega": omega,
         }
 
     return {
@@ -170,7 +186,7 @@ def _run_louvain(
 
 
 def _run_leiden(
-    network: Any, budget: BudgetSpec, seed: int, **kwargs
+    network: Any, budget: BudgetSpec, seed: int, hyperparams: Optional[Dict[str, Any]] = None, **kwargs
 ) -> Dict[str, Any]:
     """Run Leiden algorithm with budget constraints.
 
@@ -178,12 +194,18 @@ def _run_leiden(
         network: Multilayer network
         budget: Budget specification
         seed: Random seed
+        hyperparams: HPO hyperparameters (gamma, omega, n_iterations)
         **kwargs: Additional parameters
 
     Returns:
         Dict with 'partition', 'warnings', 'meta'
     """
     from py3plex.algorithms.community_detection import leiden_multilayer
+
+    hp = hyperparams or {}
+    gamma = hp.get("gamma", 1.0)
+    omega = hp.get("omega", 1.0)
+    n_iterations = hp.get("n_iterations", 2)
 
     # Check if UQ is requested
     enable_uq = budget.uq_samples is not None and budget.uq_samples > 1
@@ -196,7 +218,10 @@ def _run_leiden(
 
         uq_result = multilayer_leiden_uq(
             network,
+            gamma=gamma,
+            omega=omega,
             n_runs=n_samples,
+            n_iterations=n_iterations,
             random_state=seed,
         )
 
@@ -205,19 +230,28 @@ def _run_leiden(
         meta = {
             "uq_enabled": True,
             "n_samples": n_samples,
+            "gamma": gamma,
+            "omega": omega,
+            "n_iterations": n_iterations,
         }
 
     else:
         # Run without UQ
         leiden_result = leiden_multilayer(
             network,
+            interlayer_coupling=omega,
+            resolution=gamma,
             seed=seed,
+            max_iter=n_iterations,
         )
 
         partition = leiden_result.communities
 
         meta = {
             "uq_enabled": False,
+            "gamma": gamma,
+            "omega": omega,
+            "n_iterations": n_iterations,
         }
 
     return {
@@ -228,7 +262,7 @@ def _run_leiden(
 
 
 def _run_label_propagation(
-    network: Any, budget: BudgetSpec, seed: int, **kwargs
+    network: Any, budget: BudgetSpec, seed: int, hyperparams: Optional[Dict[str, Any]] = None, **kwargs
 ) -> Dict[str, Any]:
     """Run Label Propagation algorithm with budget constraints.
 
@@ -243,8 +277,9 @@ def _run_label_propagation(
     """
     from py3plex.algorithms.community_detection import label_propagation
 
-    # Label propagation doesn't have native UQ support yet
-    max_iter = budget.max_iter or 100
+    hp = hyperparams or {}
+    # hyperparams max_iter overrides budget max_iter
+    max_iter = hp.get("max_iter", budget.max_iter or 100)
 
     try:
         communities = label_propagation(
@@ -281,7 +316,7 @@ def _run_label_propagation(
 
 
 def _run_sbm(
-    network: Any, budget: BudgetSpec, seed: int, **kwargs
+    network: Any, budget: BudgetSpec, seed: int, hyperparams: Optional[Dict[str, Any]] = None, **kwargs
 ) -> Dict[str, Any]:
     """Run standard SBM algorithm with budget constraints.
 
@@ -289,6 +324,7 @@ def _run_sbm(
         network: Multilayer network
         budget: Budget specification
         seed: Random seed
+        hyperparams: HPO hyperparameters (K_range)
         **kwargs: Additional parameters
 
     Returns:
@@ -297,12 +333,14 @@ def _run_sbm(
     import numpy as np
     from py3plex.algorithms.sbm import fit_multilayer_sbm
 
+    hp = hyperparams or {}
+
     # Extract budget parameters
     max_iter = budget.max_iter or 500
     n_restarts = budget.n_restarts or 5
-    
-    # Determine K_range from kwargs or budget
-    K_range = kwargs.pop("K_range", None)
+
+    # K_range: hyperparams > kwargs > default
+    K_range = hp.get("K_range", kwargs.pop("K_range", None))
     if K_range is None:
         # Default K range for model selection
         K_range = [2, 3, 4, 5, 6, 7, 8]
@@ -396,7 +434,7 @@ def _run_sbm(
 
 
 def _run_dc_sbm(
-    network: Any, budget: BudgetSpec, seed: int, **kwargs
+    network: Any, budget: BudgetSpec, seed: int, hyperparams: Optional[Dict[str, Any]] = None, **kwargs
 ) -> Dict[str, Any]:
     """Run Degree-Corrected SBM algorithm with budget constraints.
 
@@ -404,6 +442,7 @@ def _run_dc_sbm(
         network: Multilayer network
         budget: Budget specification
         seed: Random seed
+        hyperparams: HPO hyperparameters (K_range)
         **kwargs: Additional parameters
 
     Returns:
@@ -412,12 +451,14 @@ def _run_dc_sbm(
     import numpy as np
     from py3plex.algorithms.sbm import fit_multilayer_sbm
 
+    hp = hyperparams or {}
+
     # Extract budget parameters
     max_iter = budget.max_iter or 500
     n_restarts = budget.n_restarts or 5
-    
-    # Determine K_range from kwargs or budget
-    K_range = kwargs.pop("K_range", None)
+
+    # K_range: hyperparams > kwargs > default
+    K_range = hp.get("K_range", kwargs.pop("K_range", None))
     if K_range is None:
         # Default K range for model selection
         K_range = [2, 3, 4, 5, 6, 7, 8]

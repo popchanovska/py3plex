@@ -20,6 +20,12 @@ from py3plex.algorithms.community_detection.budget import BudgetSpec, CommunityR
 from py3plex.algorithms.community_detection.runner import run_community_algorithm
 from py3plex._parallel import spawn_seeds
 
+# Imported lazily to avoid circular imports at module load time.
+# Use TYPE_CHECKING guard for type hints only.
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from py3plex.algorithms.community_detection.hpo import AlgoConfig
+
 
 @dataclass
 class RacingHistory:
@@ -171,18 +177,34 @@ class SuccessiveHalvingRacer:
         algorithm_ids: List[str],
         metric_names: List[str],
         n_jobs: int = 1,
+        configs: Optional[List["AlgoConfig"]] = None,
     ) -> RacingHistory:
         """Run successive halving race.
 
+        When ``configs`` is provided it takes precedence over ``algorithm_ids``.
+        Each :class:`AlgoConfig` carries its own hyperparameters, enabling HPO
+        racing in addition to plain algorithm selection.
+
         Args:
             network: Multilayer network
-            algorithm_ids: List of candidate algorithm IDs
+            algorithm_ids: List of candidate algorithm IDs (used when configs=None)
             metric_names: List of metric names to evaluate
             n_jobs: Number of parallel jobs (not yet implemented)
+            configs: Optional list of AlgoConfig objects (algorithm + hyperparams).
+                When provided, overrides algorithm_ids.
 
         Returns:
             RacingHistory with winner and full round-by-round history
         """
+        # Build the (algo_id, hyperparams) table used throughout the race.
+        if configs is not None:
+            algorithm_ids = [c.algo_id for c in configs]
+            self._hyperparams_map: Dict[str, Dict[str, Any]] = {
+                c.algo_id: c.hyperparams for c in configs
+            }
+        else:
+            self._hyperparams_map = {}
+
         if not algorithm_ids:
             raise ValueError("Must provide at least one algorithm")
 
@@ -355,11 +377,13 @@ class SuccessiveHalvingRacer:
 
         for algo_id, seed in zip(algorithm_ids, round_seeds):
             try:
+                hyperparams = getattr(self, "_hyperparams_map", {}).get(algo_id)
                 result = run_community_algorithm(
                     algorithm_id=algo_id,
                     network=network,
                     budget=budget,
                     seed=seed,
+                    hyperparams=hyperparams,
                 )
                 results.append(result)
             except Exception as e:

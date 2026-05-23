@@ -24,6 +24,8 @@ from py3plex.algorithms.community_detection.autocommunity import (
     CommunityStats,
 )
 from py3plex.uncertainty.partition import CommunityDistribution
+from py3plex.algorithms.community_detection.hpo import AlgoConfig, generate_all_configs
+from py3plex.algorithms.community_detection.meta_learner import rank_by_warmstart
 
 
 def execute_autocommunity(
@@ -56,13 +58,24 @@ def execute_autocommunity(
     """
     # Phase 1: Compute graph regime features
     regime_features = _compute_graph_regime(network)
-    
-    # Phase 2: Run all candidate algorithms
+
+    # Phase 1b: HPO search space expansion + meta-learner warm-start ranking.
+    # Generate (algorithm, hyperparams) candidate configs, then rank them by
+    # how well their hyperparameters match the observed graph regime features.
+    hpo_configs = generate_all_configs(
+        candidate_algorithms,
+        max_configs_per_algo=4,
+        fast=True,
+    )
+    hpo_configs = rank_by_warmstart(hpo_configs, regime_features)
+
+    # Phase 2: Run all candidate algorithms (with HPO configs)
     algorithm_results = _run_candidate_algorithms(
         network=network,
         candidates=candidate_algorithms,
         seed=seed,
         uq_config=uq_config,
+        hpo_configs=hpo_configs,
     )
     
     if not algorithm_results:
@@ -286,15 +299,22 @@ def _run_candidate_algorithms(
     candidates: List[str],
     seed: int,
     uq_config: Optional[Dict[str, Any]],
+    hpo_configs: Optional[List[AlgoConfig]] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Run all candidate algorithms and collect results.
-    
+
+    When ``hpo_configs`` is provided each config is run independently,
+    allowing different hyperparameter settings of the same algorithm to
+    compete against each other (HPO racing). Otherwise falls back to
+    running each algorithm once with default hyperparameters.
+
     Args:
         network: Multilayer network
         candidates: List of algorithm names
         seed: Random seed
         uq_config: UQ configuration (or None)
-    
+        hpo_configs: Optional list of AlgoConfig objects (from HPO + warm-start)
+
     Returns:
         Dictionary mapping algorithm_id -> result dict
     """
@@ -303,17 +323,31 @@ def _run_candidate_algorithms(
         leiden_multilayer,
         multilayer_leiden_uq,
     )
-    
+
+    # Build the list of (algo_id, algo_name, hyperparams) to run.
+    # HPO configs are already warm-start ranked (best first).
+    if hpo_configs:
+        run_list = [
+            (cfg.algo_id, cfg.algo_name, cfg.hyperparams)
+            for cfg in hpo_configs
+        ]
+    else:
+        run_list = [
+            (f"{algo_name}:default", algo_name, {})
+            for algo_name in candidates
+        ]
+
     results = {}
-    
-    for algo_name in candidates:
-        algo_id = f"{algo_name}:default"
+
+    for algo_id, algo_name, hyperparams in run_list:
         
         try:
             start_time = time.time()
             
-            # Run algorithm
+            # Run algorithm — pass hyperparams so HPO settings take effect
             if algo_name == "louvain":
+                gamma = hyperparams.get("gamma", 1.0)
+                omega = hyperparams.get("omega", 1.0)
                 if uq_config:
                     # Run with UQ
                     from py3plex.algorithms.community_detection import multilayer_louvain_distribution
@@ -332,16 +366,24 @@ def _run_candidate_algorithms(
                 else:
                     partition_dict, _ = multilayer_louvain(
                         network,
+                        gamma=gamma,
+                        omega=omega,
                         random_state=seed,
                     )
                     uq_data = None
-            
+
             elif algo_name == "leiden":
+                gamma = hyperparams.get("gamma", 1.0)
+                omega = hyperparams.get("omega", 1.0)
+                n_iterations = hyperparams.get("n_iterations", 2)
                 if uq_config:
                     # Run with UQ
                     uq_result = multilayer_leiden_uq(
                         network,
+                        gamma=gamma,
+                        omega=omega,
                         n_runs=uq_config.get('n_samples', 50),
+                        n_iterations=n_iterations,
                         random_state=seed,
                     )
                     partition_dict = uq_result.consensus_partition
@@ -349,9 +391,12 @@ def _run_candidate_algorithms(
                 else:
                     leiden_result = leiden_multilayer(
                         network,
+                        interlayer_coupling=omega,
+                        resolution=gamma,
                         seed=seed,
+                        max_iter=n_iterations,
                     )
-                    partition_dict = leiden_result.communities  # Use 'communities', not 'partition'
+                    partition_dict = leiden_result.communities
                     uq_data = None
 
             elif algo_name in ("sbm", "standard_sbm", "dc_sbm", "degree_corrected_sbm"):
@@ -369,13 +414,13 @@ def _run_candidate_algorithms(
                 # Map algorithm name
                 algo_id_runner = "dc_sbm" if algo_name in ("dc_sbm", "degree_corrected_sbm") else "sbm"
 
-                # Run via runner
+                # Run via runner — pass full hyperparams (K_range, etc.)
                 result = run_community_algorithm(
                     algorithm_id=algo_id_runner,
                     network=network,
                     budget=budget,
                     seed=seed,
-                    K_range=[2, 3, 4, 5, 6]  # Conservative K range for AutoCommunity
+                    hyperparams=hyperparams or {"K_range": [2, 3, 4, 5, 6]},
                 )
 
                 partition_dict = result.partition
@@ -1151,13 +1196,24 @@ def execute_autocommunity_sh(
     
     # Create racer
     racer = SuccessiveHalvingRacer(config, seed=seed)
-    
-    # Run race
+
+    # Generate HPO configs and apply meta-learner warm-start ranking so the
+    # racer explores promising (algorithm, hyperparams) combinations first.
+    regime_features = _compute_graph_regime(network)
+    hpo_configs = generate_all_configs(
+        candidate_algorithms,
+        max_configs_per_algo=4,
+        fast=True,
+    )
+    hpo_configs = rank_by_warmstart(hpo_configs, regime_features)
+
+    # Run race with HPO-expanded, warm-start-ranked configs
     history = racer.race(
         network=network,
         algorithm_ids=candidate_algorithms,
         metric_names=metric_names,
         n_jobs=1,
+        configs=hpo_configs,
     )
     
     # Extract winner partition

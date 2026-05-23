@@ -37,6 +37,8 @@ from .distributional import (
 from .auto_select import auto_select_community
 from .autocommunity import AutoCommunity, AutoCommunityResult, CommunityStats
 from .budget import BudgetSpec, CommunityResult
+from .hpo import AlgoConfig, generate_configs, generate_all_configs, SEARCH_SPACES
+from .meta_learner import warmstart_scores, rank_by_warmstart
 from .successive_halving import (
     SuccessiveHalvingRacer,
     SuccessiveHalvingConfig,
@@ -162,4 +164,10 @@ __all__ = [
     "sbm_multilayer_fit",
     "flow_hierarchical_communities",
     "FlowHierarchyResult",
+    "AlgoConfig",
+    "generate_configs",
+    "generate_all_configs",
+    "SEARCH_SPACES",
+    "warmstart_scores",
+    "rank_by_warmstart",
 ]
